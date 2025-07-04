@@ -8,6 +8,11 @@
 (define-constant ERR_NOT_MEMBER (err u106))
 (define-constant ERR_ALREADY_MEMBER (err u107))
 (define-constant ERR_PROPOSAL_NOT_PASSED (err u108))
+(define-constant ERR_INVALID_ACTIVITY (err u200))
+(define-constant ERR_STREAK_RESET (err u201))
+
+(define-data-var season-counter uint u1)
+(define-data-var season-blocks uint u1008)
 
 (define-data-var proposal-counter uint u0)
 (define-data-var village-treasury uint u0)
@@ -194,4 +199,105 @@
     (map-set members member status)
     (ok true)
   )
+)
+
+
+(define-map member-activity
+  principal
+  {
+    total-votes: uint,
+    total-proposals: uint,
+    voting-streak: uint,
+    last-vote-block: uint,
+    reputation-score: uint,
+    season-votes: uint,
+    season-proposals: uint
+  }
+)
+
+(define-map season-leaderboard
+  { season: uint, rank: uint }
+  { member: principal, score: uint }
+)
+
+(define-public (track-vote-activity (member principal))
+  (let (
+    (current-activity (default-to 
+      { total-votes: u0, total-proposals: u0, voting-streak: u0, 
+        last-vote-block: u0, reputation-score: u0, season-votes: u0, season-proposals: u0 }
+      (map-get? member-activity member)
+    ))
+    (blocks-since-last (- stacks-block-height (get last-vote-block current-activity)))
+    (streak-broken (> blocks-since-last u1008))
+    (new-streak (if streak-broken u1 (+ (get voting-streak current-activity) u1)))
+  )
+    (asserts! (is-some (map-get? members member)) ERR_NOT_MEMBER)
+    (map-set member-activity member {
+      total-votes: (+ (get total-votes current-activity) u1),
+      total-proposals: (get total-proposals current-activity),
+      voting-streak: new-streak,
+      last-vote-block: stacks-block-height,
+      reputation-score: (calculate-reputation-score member),
+      season-votes: (+ (get season-votes current-activity) u1),
+      season-proposals: (get season-proposals current-activity)
+    })
+    (ok true)
+  )
+)
+
+(define-public (track-proposal-activity (member principal))
+  (let (
+    (current-activity (default-to 
+      { total-votes: u0, total-proposals: u0, voting-streak: u0, 
+        last-vote-block: u0, reputation-score: u0, season-votes: u0, season-proposals: u0 }
+      (map-get? member-activity member)
+    ))
+  )
+    (asserts! (is-some (map-get? members member)) ERR_NOT_MEMBER)
+    (map-set member-activity member {
+      total-votes: (get total-votes current-activity),
+      total-proposals: (+ (get total-proposals current-activity) u1),
+      voting-streak: (get voting-streak current-activity),
+      last-vote-block: (get last-vote-block current-activity),
+      reputation-score: (calculate-reputation-score member),
+      season-votes: (get season-votes current-activity),
+      season-proposals: (+ (get season-proposals current-activity) u1)
+    })
+    (ok true)
+  )
+)
+
+(define-private (calculate-reputation-score (member principal))
+  (let (
+    (activity (default-to 
+      { total-votes: u0, total-proposals: u0, voting-streak: u0, 
+        last-vote-block: u0, reputation-score: u0, season-votes: u0, season-proposals: u0 }
+      (map-get? member-activity member)
+    ))
+    (base-score (+ (* (get total-votes activity) u10) (* (get total-proposals activity) u25)))
+    (streak-bonus (* (get voting-streak activity) u5))
+  )
+    (+ base-score streak-bonus)
+  )
+)
+
+(define-read-only (get-member-activity (member principal))
+  (map-get? member-activity member)
+)
+
+(define-read-only (get-member-reputation (member principal))
+  (match (map-get? member-activity member)
+    activity (some (get reputation-score activity))
+    none
+  )
+)
+
+(define-read-only (get-top-contributors (limit uint))
+  (let ((current-season (var-get season-counter)))
+    (map get-leaderboard-entry (list u1 u2 u3 u4 u5))
+  )
+)
+
+(define-private (get-leaderboard-entry (rank uint))
+  (map-get? season-leaderboard { season: (var-get season-counter), rank: rank })
 )
