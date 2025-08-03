@@ -11,6 +11,14 @@
 (define-constant ERR_INVALID_ACTIVITY (err u200))
 (define-constant ERR_STREAK_RESET (err u201))
 
+(define-constant ERR_SKILL_NOT_FOUND (err u300))
+(define-constant ERR_CANNOT_VERIFY_OWN_SKILL (err u301))
+(define-constant ERR_ALREADY_VERIFIED (err u302))
+(define-constant ERR_VERIFICATION_STAKE_TOO_LOW (err u303))
+
+(define-data-var skill-counter uint u0)
+(define-data-var min-verification-stake uint u100000)
+
 (define-data-var season-counter uint u1)
 (define-data-var season-blocks uint u1008)
 
@@ -300,4 +308,82 @@
 
 (define-private (get-leaderboard-entry (rank uint))
   (map-get? season-leaderboard { season: (var-get season-counter), rank: rank })
+)
+
+
+(define-map member-skills
+  { member: principal, skill-id: uint }
+  { skill-name: (string-ascii 50), experience-level: uint, verified: bool }
+)
+
+(define-map skill-verifications
+  { skill-owner: principal, skill-id: uint, verifier: principal }
+  { stake-amount: uint, verification-block: uint }
+)
+
+(define-map skills-index
+  uint
+  { skill-name: (string-ascii 50), creator: principal, total-verifications: uint }
+)
+
+(define-public (declare-skill (skill-name (string-ascii 50)) (experience-level uint))
+  (let ((skill-id (+ (var-get skill-counter) u1)))
+    (asserts! (is-some (map-get? members tx-sender)) ERR_NOT_MEMBER)
+    (asserts! (<= experience-level u10) (err u304))
+    (map-set member-skills 
+      { member: tx-sender, skill-id: skill-id }
+      { skill-name: skill-name, experience-level: experience-level, verified: false }
+    )
+    (map-set skills-index skill-id 
+      { skill-name: skill-name, creator: tx-sender, total-verifications: u0 }
+    )
+    (var-set skill-counter skill-id)
+    (ok skill-id)
+  )
+)
+
+(define-public (verify-member-skill (skill-owner principal) (skill-id uint) (stake-amount uint))
+  (let (
+    (skill-key { member: skill-owner, skill-id: skill-id })
+    (verification-key { skill-owner: skill-owner, skill-id: skill-id, verifier: tx-sender })
+    (skill (unwrap! (map-get? member-skills skill-key) ERR_SKILL_NOT_FOUND))
+  )
+    (asserts! (is-some (map-get? members tx-sender)) ERR_NOT_MEMBER)
+    (asserts! (not (is-eq tx-sender skill-owner)) ERR_CANNOT_VERIFY_OWN_SKILL)
+    (asserts! (is-none (map-get? skill-verifications verification-key)) ERR_ALREADY_VERIFIED)
+    (asserts! (>= stake-amount (var-get min-verification-stake)) ERR_VERIFICATION_STAKE_TOO_LOW)
+    
+    (try! (stx-transfer? stake-amount tx-sender (as-contract tx-sender)))
+    
+    (map-set skill-verifications verification-key
+      { stake-amount: stake-amount, verification-block: stacks-block-height }
+    )
+    
+    (let ((skill-index (unwrap! (map-get? skills-index skill-id) ERR_SKILL_NOT_FOUND)))
+      (map-set skills-index skill-id
+        (merge skill-index { total-verifications: (+ (get total-verifications skill-index) u1) })
+      )
+    )
+    
+    (if (>= (get total-verifications (unwrap! (map-get? skills-index skill-id) ERR_SKILL_NOT_FOUND)) u3)
+      (map-set member-skills skill-key (merge skill { verified: true }))
+      true
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-member-skills (member principal))
+  (map-get? member-skills { member: member, skill-id: u1 })
+)
+
+(define-read-only (find-skilled-members (skill-name (string-ascii 50)))
+  (map-get? skills-index u1)
+)
+
+(define-read-only (get-skill-verification-count (skill-owner principal) (skill-id uint))
+  (match (map-get? skills-index skill-id)
+    skill-info (some (get total-verifications skill-info))
+    none
+  )
 )
