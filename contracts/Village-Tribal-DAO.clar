@@ -16,6 +16,14 @@
 (define-constant ERR_ALREADY_VERIFIED (err u302))
 (define-constant ERR_VERIFICATION_STAKE_TOO_LOW (err u303))
 
+(define-constant ERR_MENTORSHIP_NOT_FOUND (err u400))
+(define-constant ERR_NOT_MENTOR (err u401))
+(define-constant ERR_MENTORSHIP_EXPIRED (err u402))
+(define-constant ERR_INSUFFICIENT_REPUTATION (err u403))
+
+(define-data-var mentorship-counter uint u0)
+(define-data-var min-mentor-reputation uint u100)
+
 (define-data-var skill-counter uint u0)
 (define-data-var min-verification-stake uint u100000)
 
@@ -386,4 +394,100 @@
     skill-info (some (get total-verifications skill-info))
     none
   )
+)
+
+
+(define-map mentorships
+  uint
+  {
+    mentor: principal,
+    mentee: principal,
+    topic: (string-ascii 50),
+    hourly-rate: uint,
+    duration-blocks: uint,
+    start-block: uint,
+    status: (string-ascii 20),
+    total-paid: uint
+  }
+)
+
+(define-map mentor-profiles
+  principal
+  {
+    expertise: (string-ascii 100),
+    hourly-rate: uint,
+    total-mentees: uint,
+    rating-sum: uint,
+    rating-count: uint,
+    active: bool
+  }
+)
+
+(define-public (create-mentor-profile (expertise (string-ascii 100)) (hourly-rate uint))
+  (let ((current-reputation (unwrap! (get-member-reputation tx-sender) (err u0))))
+    (asserts! (is-some (map-get? members tx-sender)) ERR_NOT_MEMBER)
+    (asserts! (>= current-reputation (var-get min-mentor-reputation)) ERR_INSUFFICIENT_REPUTATION)
+    (map-set mentor-profiles tx-sender {
+      expertise: expertise,
+      hourly-rate: hourly-rate,
+      total-mentees: u0,
+      rating-sum: u0,
+      rating-count: u0,
+      active: true
+    })
+    (ok true)
+  )
+)
+
+(define-public (request-mentorship (mentor principal) (topic (string-ascii 50)) (duration-blocks uint))
+  (let (
+    (mentorship-id (+ (var-get mentorship-counter) u1))
+    (mentor-profile (unwrap! (map-get? mentor-profiles mentor) ERR_NOT_MENTOR))
+    (total-cost (* (get hourly-rate mentor-profile) (/ duration-blocks u24)))
+  )
+    (asserts! (is-some (map-get? members tx-sender)) ERR_NOT_MEMBER)
+    (asserts! (get active mentor-profile) ERR_NOT_MENTOR)
+    (try! (stx-transfer? total-cost tx-sender (as-contract tx-sender)))
+    (map-set mentorships mentorship-id {
+      mentor: mentor,
+      mentee: tx-sender,
+      topic: topic,
+      hourly-rate: (get hourly-rate mentor-profile),
+      duration-blocks: duration-blocks,
+      start-block: stacks-block-height,
+      status: "active",
+      total-paid: total-cost
+    })
+    (var-set mentorship-counter mentorship-id)
+    (ok mentorship-id)
+  )
+)
+
+(define-public (complete-mentorship (mentorship-id uint) (rating uint))
+  (let (
+    (mentorship (unwrap! (map-get? mentorships mentorship-id) ERR_MENTORSHIP_NOT_FOUND))
+    (mentor-profile (unwrap! (map-get? mentor-profiles (get mentor mentorship)) ERR_NOT_MENTOR))
+  )
+    (asserts! (is-eq tx-sender (get mentee mentorship)) ERR_NOT_AUTHORIZED)
+    (asserts! (<= rating u5) (err u404))
+    (try! (as-contract (stx-transfer? (get total-paid mentorship) tx-sender (get mentor mentorship))))
+    (map-set mentorships mentorship-id (merge mentorship { status: "completed" }))
+    (map-set mentor-profiles (get mentor mentorship) {
+      expertise: (get expertise mentor-profile),
+      hourly-rate: (get hourly-rate mentor-profile),
+      total-mentees: (+ (get total-mentees mentor-profile) u1),
+      rating-sum: (+ (get rating-sum mentor-profile) rating),
+      rating-count: (+ (get rating-count mentor-profile) u1),
+      active: (get active mentor-profile)
+    })
+    (ok true)
+  )
+)
+
+(define-read-only (get-mentor-profile (mentor principal))
+  (map-get? mentor-profiles mentor)
+)
+
+(define-read-only (get-mentorship (mentorship-id uint))
+  (map-get? mentorships mentorship-id)
 )
