@@ -491,3 +491,104 @@
 (define-read-only (get-mentorship (mentorship-id uint))
   (map-get? mentorships mentorship-id)
 )
+
+
+(define-constant ERR_BOUNTY_PROPOSAL_NOT_FOUND (err u500))
+(define-constant ERR_BOUNTY_TOO_LOW (err u501))
+(define-constant ERR_PROPOSAL_NOT_EXECUTED (err u502))
+(define-constant ERR_NO_ELIGIBLE_VOTES (err u503))
+(define-constant ERR_ALREADY_CLAIMED (err u504))
+
+(define-data-var min-bounty-amount uint u10000)
+
+(define-map proposal-bounties
+  uint
+  { total-bounty: uint, contributors-count: uint, distributed: bool }
+)
+
+(define-map bounty-contributions
+  { proposal-id: uint, contributor: principal }
+  { amount: uint, claimed: bool }
+)
+
+(define-public (place-bounty-on-proposal (proposal-id uint) (bounty-amount uint))
+  (let (
+    (proposal (unwrap! (map-get? proposals proposal-id) ERR_BOUNTY_PROPOSAL_NOT_FOUND))
+    (contribution-key { proposal-id: proposal-id, contributor: tx-sender })
+    (existing-contribution (map-get? bounty-contributions contribution-key))
+    (current-bounty (default-to 
+      { total-bounty: u0, contributors-count: u0, distributed: false }
+      (map-get? proposal-bounties proposal-id)
+    ))
+  )
+    (asserts! (is-some (map-get? members tx-sender)) ERR_NOT_MEMBER)
+    (asserts! (>= bounty-amount (var-get min-bounty-amount)) ERR_BOUNTY_TOO_LOW)
+    (asserts! (< stacks-block-height (get voting-end-block proposal)) ERR_VOTING_ENDED)
+    (try! (stx-transfer? bounty-amount tx-sender (as-contract tx-sender)))
+    (match existing-contribution
+      existing-data
+      (map-set bounty-contributions contribution-key 
+        { amount: (+ (get amount existing-data) bounty-amount), claimed: false }
+      )
+      (begin
+        (map-set bounty-contributions contribution-key 
+          { amount: bounty-amount, claimed: false }
+        )
+        (map-set proposal-bounties proposal-id
+          (merge current-bounty { contributors-count: (+ (get contributors-count current-bounty) u1) })
+        )
+      )
+    )
+    (map-set proposal-bounties proposal-id
+      (merge current-bounty { total-bounty: (+ (get total-bounty current-bounty) bounty-amount) })
+    )
+    (ok true)
+  )
+)
+
+(define-public (claim-bounty-reward (proposal-id uint))
+  (let (
+    (proposal (unwrap! (map-get? proposals proposal-id) ERR_BOUNTY_PROPOSAL_NOT_FOUND))
+    (bounty-data (unwrap! (map-get? proposal-bounties proposal-id) ERR_BOUNTY_PROPOSAL_NOT_FOUND))
+    (vote-data (unwrap! (map-get? votes { proposal-id: proposal-id, voter: tx-sender }) ERR_NO_ELIGIBLE_VOTES))
+  )
+    (asserts! (get executed proposal) ERR_PROPOSAL_NOT_EXECUTED)
+    (asserts! (> (get votes-for proposal) (get votes-against proposal)) ERR_PROPOSAL_NOT_PASSED)
+    (asserts! (get vote vote-data) ERR_NO_ELIGIBLE_VOTES)
+    (let (
+      (total-yes-votes (get votes-for proposal))
+      (voter-power (get voting-power vote-data))
+      (reward-share (/ (* (get total-bounty bounty-data) voter-power) total-yes-votes))
+    )
+      (try! (as-contract (stx-transfer? reward-share tx-sender tx-sender)))
+      (ok reward-share)
+    )
+  )
+)
+
+(define-read-only (get-proposal-bounty (proposal-id uint))
+  (map-get? proposal-bounties proposal-id)
+)
+
+(define-read-only (get-bounty-contribution (proposal-id uint) (contributor principal))
+  (map-get? bounty-contributions { proposal-id: proposal-id, contributor: contributor })
+)
+
+(define-read-only (calculate-potential-reward (proposal-id uint) (member principal))
+  (match (map-get? votes { proposal-id: proposal-id, voter: member })
+    vote-data
+    (match (map-get? proposal-bounties proposal-id)
+      bounty-data
+      (match (map-get? proposals proposal-id)
+        proposal
+        (if (and (get vote vote-data) (> (get votes-for proposal) u0))
+          (some (/ (* (get total-bounty bounty-data) (get voting-power vote-data)) (get votes-for proposal)))
+          none
+        )
+        none
+      )
+      none
+    )
+    none
+  )
+)
