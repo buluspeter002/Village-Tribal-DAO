@@ -21,6 +21,14 @@
 (define-constant ERR_MENTORSHIP_EXPIRED (err u402))
 (define-constant ERR_INSUFFICIENT_REPUTATION (err u403))
 
+(define-constant ERR_IMPACT_ALREADY_REPORTED (err u600))
+(define-constant ERR_NOT_PROPOSER (err u601))
+(define-constant ERR_CANNOT_VALIDATE_OWN_REPORT (err u602))
+(define-constant ERR_ALREADY_VALIDATED (err u603))
+(define-constant ERR_IMPACT_NOT_REPORTED (err u604))
+
+(define-data-var min-impact-validation-stake uint u50000)
+
 (define-data-var mentorship-counter uint u0)
 (define-data-var min-mentor-reputation uint u100)
 
@@ -588,6 +596,140 @@
         none
       )
       none
+    )
+    none
+  )
+)
+
+(define-map proposal-impacts
+  uint
+  {
+    success-rating: uint,
+    impact-description: (string-ascii 200),
+    evidence-link: (string-ascii 100),
+    report-block: uint,
+    validations-for: uint,
+    validations-against: uint,
+    finalized: bool
+  }
+)
+
+(define-map impact-validations
+  { proposal-id: uint, validator: principal }
+  { supports: bool, stake-amount: uint }
+)
+
+(define-map proposer-success-stats
+  principal
+  {
+    total-reported: uint,
+    success-count: uint,
+    total-success-rating: uint,
+    credibility-score: uint
+  }
+)
+
+(define-public (report-proposal-impact 
+  (proposal-id uint)
+  (success-rating uint)
+  (impact-description (string-ascii 200))
+  (evidence-link (string-ascii 100))
+)
+  (let ((proposal (unwrap! (map-get? proposals proposal-id) ERR_PROPOSAL_NOT_FOUND)))
+    (asserts! (is-eq tx-sender (get proposer proposal)) ERR_NOT_PROPOSER)
+    (asserts! (get executed proposal) ERR_PROPOSAL_NOT_EXECUTED)
+    (asserts! (is-none (map-get? proposal-impacts proposal-id)) ERR_IMPACT_ALREADY_REPORTED)
+    (asserts! (<= success-rating u10) (err u605))
+    (map-set proposal-impacts proposal-id {
+      success-rating: success-rating,
+      impact-description: impact-description,
+      evidence-link: evidence-link,
+      report-block: stacks-block-height,
+      validations-for: u0,
+      validations-against: u0,
+      finalized: false
+    })
+    (ok true)
+  )
+)
+
+(define-public (validate-impact-report (proposal-id uint) (supports bool) (stake-amount uint))
+  (let (
+    (proposal (unwrap! (map-get? proposals proposal-id) ERR_PROPOSAL_NOT_FOUND))
+    (impact (unwrap! (map-get? proposal-impacts proposal-id) ERR_IMPACT_NOT_REPORTED))
+    (validation-key { proposal-id: proposal-id, validator: tx-sender })
+  )
+    (asserts! (is-some (map-get? members tx-sender)) ERR_NOT_MEMBER)
+    (asserts! (not (is-eq tx-sender (get proposer proposal))) ERR_CANNOT_VALIDATE_OWN_REPORT)
+    (asserts! (is-none (map-get? impact-validations validation-key)) ERR_ALREADY_VALIDATED)
+    (asserts! (>= stake-amount (var-get min-impact-validation-stake)) (err u606))
+    (try! (stx-transfer? stake-amount tx-sender (as-contract tx-sender)))
+    (map-set impact-validations validation-key 
+      { supports: supports, stake-amount: stake-amount }
+    )
+    (if supports
+      (map-set proposal-impacts proposal-id 
+        (merge impact { validations-for: (+ (get validations-for impact) u1) }))
+      (map-set proposal-impacts proposal-id 
+        (merge impact { validations-against: (+ (get validations-against impact) u1) }))
+    )
+    (if (>= (+ (get validations-for impact) (get validations-against impact)) u3)
+      (finalize-impact-report proposal-id)
+      (ok true)
+    )
+  )
+)
+
+(define-private (finalize-impact-report (proposal-id uint))
+  (let (
+    (proposal (unwrap! (map-get? proposals proposal-id) ERR_PROPOSAL_NOT_FOUND))
+    (impact (unwrap! (map-get? proposal-impacts proposal-id) ERR_IMPACT_NOT_REPORTED))
+    (proposer (get proposer proposal))
+    (stats (default-to 
+      { total-reported: u0, success-count: u0, total-success-rating: u0, credibility-score: u0 }
+      (map-get? proposer-success-stats proposer)
+    ))
+    (validated (> (get validations-for impact) (get validations-against impact)))
+  )
+    (map-set proposal-impacts proposal-id (merge impact { finalized: true }))
+    (if validated
+      (map-set proposer-success-stats proposer {
+        total-reported: (+ (get total-reported stats) u1),
+        success-count: (if (>= (get success-rating impact) u7) (+ (get success-count stats) u1) (get success-count stats)),
+        total-success-rating: (+ (get total-success-rating stats) (get success-rating impact)),
+        credibility-score: (calculate-credibility-score 
+          (+ (get total-reported stats) u1)
+          (if (>= (get success-rating impact) u7) (+ (get success-count stats) u1) (get success-count stats))
+          (+ (get total-success-rating stats) (get success-rating impact))
+        )
+      })
+      true
+    )
+    (ok true)
+  )
+)
+
+(define-private (calculate-credibility-score (total uint) (successes uint) (rating-sum uint))
+  (if (is-eq total u0)
+    u0
+    (+ (* (/ (* successes u100) total) u10) (/ rating-sum total))
+  )
+)
+
+(define-read-only (get-proposal-impact (proposal-id uint))
+  (map-get? proposal-impacts proposal-id)
+)
+
+(define-read-only (get-proposer-stats (proposer principal))
+  (map-get? proposer-success-stats proposer)
+)
+
+(define-read-only (get-proposer-success-rate (proposer principal))
+  (match (map-get? proposer-success-stats proposer)
+    stats
+    (if (> (get total-reported stats) u0)
+      (some (/ (* (get success-count stats) u100) (get total-reported stats)))
+      (some u0)
     )
     none
   )
